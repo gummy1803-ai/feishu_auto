@@ -1,5 +1,5 @@
 import fetch from 'node-fetch';
-import { execSync } from 'child_process';
+import * as nacl from 'tweetnacl';
 
 const FEISHU_APP_ID     = process.env.FEISHU_APP_ID;
 const FEISHU_APP_SECRET = process.env.FEISHU_APP_SECRET;
@@ -32,20 +32,35 @@ async function getRepoPublicKey() {
   return await r.json();
 }
 
-async function encryptSecret(publicKeyB64, secretValue) {
-  const sodium = await import('libsodium-wrappers');
-  await sodium.ready;
-  const key = sodium.from_base64(publicKeyB64, sodium.base64_variants.ORIGINAL);
-  const msg = sodium.from_string(secretValue);
-  const encrypted = sodium.crypto_box_seal(msg, key);
-  return sodium.to_base64(encrypted, sodium.base64_variants.ORIGINAL);
+function encryptSecret(publicKeyB64, secretValue) {
+  const key = Buffer.from(publicKeyB64, 'base64');
+  const msg = Buffer.from(secretValue, 'utf8');
+  const encrypted = nacl.box.before ? 
+    nacl.seal(msg, key) :
+    (() => {
+      // tweetnacl sealed box
+      const ephemeralKeyPair = nacl.box.keyPair();
+      const nonce = nacl.randomBytes(nacl.box.nonceLength);
+      const shared = nacl.box.before(key, ephemeralKeyPair.secretKey);
+      const encrypted = nacl.box.after(msg, nonce, shared);
+      const result = new Uint8Array(ephemeralKeyPair.publicKey.length + nonce.length + encrypted.length);
+      result.set(ephemeralKeyPair.publicKey);
+      result.set(nonce, ephemeralKeyPair.publicKey.length);
+      result.set(encrypted, ephemeralKeyPair.publicKey.length + nonce.length);
+      return result;
+    })();
+  return Buffer.from(encrypted).toString('base64');
 }
 
 async function updateSecret(name, value, keyData) {
-  const encrypted = await encryptSecret(keyData.key, value);
+  const encrypted = encryptSecret(keyData.key, value);
   const r = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/actions/secrets/${name}`, {
     method: "PUT",
-    headers: { "Authorization": `Bearer ${GITHUB_TOKEN}`, "X-GitHub-Api-Version": "2022-11-28", "Content-Type": "application/json" },
+    headers: { 
+      "Authorization": `Bearer ${GITHUB_TOKEN}`, 
+      "X-GitHub-Api-Version": "2022-11-28", 
+      "Content-Type": "application/json" 
+    },
     body: JSON.stringify({ encrypted_value: encrypted, key_id: keyData.key_id })
   });
   return r.status;
@@ -69,8 +84,8 @@ export default async function handler(req, res) {
     const refreshToken = tokenData.data.refresh_token;
 
     const keyData = await getRepoPublicKey();
-    await updateSecret("FEISHU_USER_TOKEN",    userToken,    keyData);
-    await updateSecret("FEISHU_REFRESH_TOKEN", refreshToken, keyData);
+    const s1 = await updateSecret("FEISHU_USER_TOKEN",    userToken,    keyData);
+    const s2 = await updateSecret("FEISHU_REFRESH_TOKEN", refreshToken, keyData);
 
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.send(`
@@ -94,6 +109,6 @@ export default async function handler(req, res) {
       </html>
     `);
   } catch (e) {
-    res.status(500).send(`服务器错误: ${e.message}`);
+    res.status(500).send(`服务器错误: ${e.message}\n${e.stack}`);
   }
 }
