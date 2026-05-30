@@ -1,5 +1,4 @@
 import fetch from 'node-fetch';
-import * as nacl from 'tweetnacl';
 
 const FEISHU_APP_ID     = process.env.FEISHU_APP_ID;
 const FEISHU_APP_SECRET = process.env.FEISHU_APP_SECRET;
@@ -32,34 +31,24 @@ async function getRepoPublicKey() {
   return await r.json();
 }
 
-function encryptSecret(publicKeyB64, secretValue) {
-  const key = Buffer.from(publicKeyB64, 'base64');
-  const msg = Buffer.from(secretValue, 'utf8');
-  const encrypted = nacl.box.before ? 
-    nacl.seal(msg, key) :
-    (() => {
-      // tweetnacl sealed box
-      const ephemeralKeyPair = nacl.box.keyPair();
-      const nonce = nacl.randomBytes(nacl.box.nonceLength);
-      const shared = nacl.box.before(key, ephemeralKeyPair.secretKey);
-      const encrypted = nacl.box.after(msg, nonce, shared);
-      const result = new Uint8Array(ephemeralKeyPair.publicKey.length + nonce.length + encrypted.length);
-      result.set(ephemeralKeyPair.publicKey);
-      result.set(nonce, ephemeralKeyPair.publicKey.length);
-      result.set(encrypted, ephemeralKeyPair.publicKey.length + nonce.length);
-      return result;
-    })();
-  return Buffer.from(encrypted).toString('base64');
+async function encryptSecret(publicKeyB64, secretValue) {
+  const sodium = await import('libsodium-wrappers');
+  await sodium.default.ready;
+  const lib = sodium.default;
+  const key = lib.from_base64(publicKeyB64, lib.base64_variants.ORIGINAL);
+  const msg = lib.from_string(secretValue);
+  const encrypted = lib.crypto_box_seal(msg, key);
+  return lib.to_base64(encrypted, lib.base64_variants.ORIGINAL);
 }
 
 async function updateSecret(name, value, keyData) {
-  const encrypted = encryptSecret(keyData.key, value);
+  const encrypted = await encryptSecret(keyData.key, value);
   const r = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/actions/secrets/${name}`, {
     method: "PUT",
-    headers: { 
-      "Authorization": `Bearer ${GITHUB_TOKEN}`, 
-      "X-GitHub-Api-Version": "2022-11-28", 
-      "Content-Type": "application/json" 
+    headers: {
+      "Authorization": `Bearer ${GITHUB_TOKEN}`,
+      "X-GitHub-Api-Version": "2022-11-28",
+      "Content-Type": "application/json"
     },
     body: JSON.stringify({ encrypted_value: encrypted, key_id: keyData.key_id })
   });
@@ -68,13 +57,11 @@ async function updateSecret(name, value, keyData) {
 
 export default async function handler(req, res) {
   const { code } = req.query;
-  if (!code) {
-    return res.status(400).send("缺少 code 参数");
-  }
+  if (!code) return res.status(400).send("缺少 code 参数");
 
   try {
-    const appToken = await getAppToken();
-    const tokenData = await getUserToken(code, appToken);
+    const appToken   = await getAppToken();
+    const tokenData  = await getUserToken(code, appToken);
 
     if (!tokenData.data) {
       return res.status(400).send(`飞书授权失败: ${JSON.stringify(tokenData)}`);
@@ -84,30 +71,28 @@ export default async function handler(req, res) {
     const refreshToken = tokenData.data.refresh_token;
 
     const keyData = await getRepoPublicKey();
-    const s1 = await updateSecret("FEISHU_USER_TOKEN",    userToken,    keyData);
-    const s2 = await updateSecret("FEISHU_REFRESH_TOKEN", refreshToken, keyData);
+    await updateSecret("FEISHU_USER_TOKEN",    userToken,    keyData);
+    await updateSecret("FEISHU_REFRESH_TOKEN", refreshToken, keyData);
 
     res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.send(`
-      <!DOCTYPE html>
-      <html lang="zh-CN">
-      <head><meta charset="UTF-8"><title>授权成功</title>
-      <style>
-        body { font-family: sans-serif; display:flex; justify-content:center; align-items:center; height:100vh; margin:0; background:#0d0f14; color:#e8eaf2; }
-        .box { text-align:center; padding:40px; background:#141720; border-radius:16px; border:1px solid rgba(255,255,255,0.07); }
-        h2 { color:#43d9a4; font-size:24px; margin-bottom:12px; }
-        p { color:#6b7280; font-size:14px; }
-      </style>
-      </head>
-      <body>
-        <div class="box">
-          <h2>✅ 授权成功</h2>
-          <p>飞书 Token 已更新，系统将在下一次运行时生效。</p>
-          <p style="margin-top:8px">可以关闭此页面了。</p>
-        </div>
-      </body>
-      </html>
-    `);
+    res.send(`<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>授权成功</title>
+<style>
+  body{font-family:sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background:#0d0f14;color:#e8eaf2}
+  .box{text-align:center;padding:40px;background:#141720;border-radius:16px;border:1px solid rgba(255,255,255,0.07)}
+  h2{color:#43d9a4;font-size:24px;margin-bottom:12px}
+  p{color:#6b7280;font-size:14px}
+</style>
+</head>
+<body>
+  <div class="box">
+    <h2>✅ 授权成功</h2>
+    <p>飞书 Token 已更新，系统将在下一次运行时生效。</p>
+    <p style="margin-top:8px">可以关闭此页面了。</p>
+  </div>
+</body>
+</html>`);
   } catch (e) {
     res.status(500).send(`服务器错误: ${e.message}\n${e.stack}`);
   }
