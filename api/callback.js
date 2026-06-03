@@ -1,23 +1,21 @@
 import fetch from 'node-fetch';
-import { createHash } from 'crypto';
 import nacl from 'tweetnacl';
+import { blake2b } from '@noble/hashes/blake2b';
 
 const FEISHU_APP_ID     = process.env.FEISHU_APP_ID;
 const FEISHU_APP_SECRET = process.env.FEISHU_APP_SECRET;
 const GITHUB_TOKEN      = process.env.GH_PAT;
-const REDIRECT_URI      = process.env.REDIRECT_URI;
 const GITHUB_REPO       = "gummy1803-ai/blogger-tracker";
 
-// 手动实现 libsodium sealed box（只用 tweetnacl + Node 内置 crypto）
+// 正确的 libsodium sealed box 实现（Blake2b nonce）
 function sealedBox(message, recipientPublicKey) {
   const ephemeral = nacl.box.keyPair();
-  const nonceInput = Buffer.concat([
-    Buffer.from(ephemeral.publicKey),
-    Buffer.from(recipientPublicKey)
-  ]);
-  const nonce = createHash('sha512').update(nonceInput).digest().slice(0, 24);
-  const msgBytes = typeof message === 'string' ? Buffer.from(message, 'utf8') : message;
-  const encrypted = nacl.box(new Uint8Array(msgBytes), new Uint8Array(nonce), recipientPublicKey, ephemeral.secretKey);
+  const nonceInput = new Uint8Array(64);
+  nonceInput.set(ephemeral.publicKey, 0);
+  nonceInput.set(recipientPublicKey, 32);
+  const nonce = blake2b(nonceInput, { dkLen: 24 });
+  const msgBytes = typeof message === 'string' ? new TextEncoder().encode(message) : message;
+  const encrypted = nacl.box(msgBytes, nonce, recipientPublicKey, ephemeral.secretKey);
   return Buffer.concat([Buffer.from(ephemeral.publicKey), Buffer.from(encrypted)]);
 }
 
@@ -79,20 +77,14 @@ async function updateSecret(name, value, keyData) {
 export default async function handler(req, res) {
   const { code, error } = req.query || {};
 
-  if (error) {
-    res.status(400).send(`飞书授权拒绝: ${error}`);
-    return;
-  }
-  if (!code) {
-    res.status(400).send('缺少 code 参数');
-    return;
-  }
+  if (error) { res.status(400).send(`飞书授权拒绝: ${error}`); return; }
+  if (!code)  { res.status(400).send('缺少 code 参数'); return; }
 
   try {
-    const appToken = await getAppToken();
-    const tokenData = await getUserToken(code, appToken);
-    const keyData = await getRepoPublicKey();
-    await updateSecret("FEISHU_USER_TOKEN", tokenData.access_token, keyData);
+    const appToken   = await getAppToken();
+    const tokenData  = await getUserToken(code, appToken);
+    const keyData    = await getRepoPublicKey();
+    await updateSecret("FEISHU_USER_TOKEN",    tokenData.access_token,  keyData);
     await updateSecret("FEISHU_REFRESH_TOKEN", tokenData.refresh_token, keyData);
 
     res.setHeader("Content-Type", "text/html; charset=utf-8");
