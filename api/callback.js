@@ -7,7 +7,6 @@ const FEISHU_APP_SECRET = process.env.FEISHU_APP_SECRET;
 const GITHUB_TOKEN      = process.env.GH_PAT;
 const GITHUB_REPO       = "gummy1803-ai/blogger-tracker";
 
-// 正确的 libsodium sealed box 实现（Blake2b nonce）
 function sealedBox(message, recipientPublicKey) {
   const ephemeral = nacl.box.keyPair();
   const nonceInput = new Uint8Array(64);
@@ -37,7 +36,11 @@ async function getUserToken(code, appToken) {
     body: JSON.stringify({ grant_type: "authorization_code", code })
   });
   const d = await r.json();
-  if (d.code !== 0) throw new Error(`获取user_token失败: ${JSON.stringify(d)}`);
+  // 把完整响应打印出来方便排查
+  console.log("飞书token响应:", JSON.stringify(d));
+  if (d.code !== 0) throw new Error(`获取user_token失败(code=${d.code}): ${d.msg || JSON.stringify(d)}`);
+  if (!d.data) throw new Error(`响应没有data字段: ${JSON.stringify(d)}`);
+  if (!d.data.access_token) throw new Error(`data里没有access_token: ${JSON.stringify(d.data)}`);
   return d.data;
 }
 
@@ -49,6 +52,7 @@ async function getRepoPublicKey() {
     }
   });
   const d = await r.json();
+  console.log("GitHub公钥响应:", JSON.stringify(d));
   if (!d.key) throw new Error(`获取GitHub公钥失败: ${JSON.stringify(d)}`);
   return d;
 }
@@ -68,6 +72,7 @@ async function updateSecret(name, value, keyData) {
       key_id: keyData.key_id
     })
   });
+  console.log(`更新Secret ${name} 状态:`, r.status);
   if (r.status !== 201 && r.status !== 204) {
     const t = await r.text();
     throw new Error(`更新Secret ${name} 失败(${r.status}): ${t}`);
@@ -75,24 +80,31 @@ async function updateSecret(name, value, keyData) {
 }
 
 export default async function handler(req, res) {
-  const { code, error } = req.query || {};
+  const url = new URL(req.url, `https://${req.headers.host}`);
+  const code  = url.searchParams.get('code');
+  const error = url.searchParams.get('error');
 
   if (error) { res.status(400).send(`飞书授权拒绝: ${error}`); return; }
   if (!code)  { res.status(400).send('缺少 code 参数'); return; }
 
   try {
+    console.log("开始授权流程, code:", code.substring(0, 10) + "...");
     const appToken   = await getAppToken();
+    console.log("app_token获取成功");
     const tokenData  = await getUserToken(code, appToken);
+    console.log("user_token获取成功");
     const keyData    = await getRepoPublicKey();
+    console.log("GitHub公钥获取成功");
     await updateSecret("FEISHU_USER_TOKEN",    tokenData.access_token,  keyData);
     await updateSecret("FEISHU_REFRESH_TOKEN", tokenData.refresh_token, keyData);
+    console.log("所有Secret更新成功");
 
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.send(`<!DOCTYPE html>
 <html lang="zh-CN">
 <head><meta charset="UTF-8"><title>授权成功</title>
 <style>
-  body{font-family:sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background:#0d0f14;color:#e8eaf2}
+  body{font-family:sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background:#0d0f14}
   .box{text-align:center;padding:48px 56px;background:#141720;border-radius:16px;border:1px solid rgba(255,255,255,0.07)}
   h2{color:#43d9a4;font-size:26px;margin-bottom:12px}
   p{color:#6b7280;font-size:14px;margin:6px 0}
@@ -107,6 +119,7 @@ export default async function handler(req, res) {
 </body>
 </html>`);
   } catch (e) {
+    console.error("授权流程出错:", e.message);
     res.status(500).send(`授权失败: ${e.message}`);
   }
 }
