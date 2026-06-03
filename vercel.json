@@ -1,6 +1,6 @@
 {
   "rewrites": [
-    { "source": "/callback", "destination": "/api/callback" },
-    { "source": "/auth", "destination": "/api/auth" }
+    { "source": "/auth", "destination": "/api/auth" },
+    { "source": "/callback", "destination": "/api/callback" }
   ]
 }
